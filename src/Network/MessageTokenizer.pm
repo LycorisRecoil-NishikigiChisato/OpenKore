@@ -12,7 +12,7 @@
 ##
 # MODULE DESCRIPTION: Conversion of byte stream to descrete messages.
 #
-# As explained by the <a href="http://wiki.openkore.com/index.php/Network_subsystem">
+# As explained by the <a href="https://openkore.com/wiki/Network_subsystem">
 # network subsystem overview</a>, the Ragnarok Online protocol uses TCP, which means
 # that all server messages are received as a byte stream.
 # This class is specialized in extracting discrete RO server or client messages from a byte
@@ -24,7 +24,8 @@ use Carp::Assert;
 use Modules 'register';
 use bytes;
 no encoding 'utf8';
-use enum qw(KNOWN_MESSAGE UNKNOWN_MESSAGE ACCOUNT_ID);
+use enum qw(KNOWN_MESSAGE UNKNOWN_MESSAGE ACCOUNT_ID ENCRYPTED_MESSAGE);
+use Globals qw($net $masterServer);
 
 ##
 # Network::MessageTokenizer->new(Hash* rpackets)
@@ -37,7 +38,7 @@ sub new {
 	assert(defined $rpackets, "Can't create new MessageTokenizer with undef packet length database (\$rpackets is undefined)") if DEBUG;
 	#Log::warning (Data::Dumper::Dumper($rpackets)."\n");
 	my %self = (
-		
+
 		rpackets => $rpackets,
 		buffer => ''
 	);
@@ -116,34 +117,28 @@ sub readNext {
 
 	return undef if (length($$buffer) < 2);
 
+	my $encryptionFlag = 0;
+
+	if (($net->getState() == Network::IN_GAME || $net->getState() == Network::CONNECTED_TO_CHAR_SERVER) && $masterServer->{enablePrefixedPackets}) {
+		my ($len, $encrypted, $packet) = unpack("v C a*", $$buffer);
+		$$buffer = $packet;
+		$encryptionFlag = $encrypted;
+	}
+
 	my $switch = getMessageID($$buffer);
 	my $rpackets = $self->{rpackets};
 	my $size = $rpackets->{$switch}{length};
-	
+
 	my $result;
-	
+
+	if(length($$buffer) == 3) {
+		return undef if($size != 3);
+	}
+
 	#Log::warning sprintf("Packet %s %d %d \n", $switch, $rpackets->{$switch}{length}, $size);
+	Log::warning sprintf("Packet %s %d \n", $switch, $size);
 
-	my $nextMessageMightBeAccountID = $self->{nextMessageMightBeAccountID};
-	$self->{nextMessageMightBeAccountID} = undef;
-
-	if ($nextMessageMightBeAccountID) {
-		if (length($$buffer) >= 4) {
-			
-		$result = substr($$buffer, 0, 4);
-		if (unpack("V1",$result) == unpack("V1",$Globals::accountID)) {
-				substr($$buffer, 0, 4, '');
-				$$type = ACCOUNT_ID;
-			} else {
-				# Account ID is "hidden" in a packet (0283 is one of them)
-				return $self->readNext($type);
-			}
-		
-		} else {
-			$self->{nextMessageMightBeAccountID} = $nextMessageMightBeAccountID;
-		}
-
-	} elsif ($size > 1) {
+	if ($size > 1) {
 		# Static length message.
 		if (length($$buffer) >= $size) {
 			$result = substr($$buffer, 0, $size);
@@ -168,7 +163,11 @@ sub readNext {
 	} else {
 		$result = $$buffer;
 		$self->{buffer} = '';
-		$$type = UNKNOWN_MESSAGE;
+		if ($encryptionFlag == 1) {
+			$$type = ENCRYPTED_MESSAGE;
+		} else {
+			$$type = UNKNOWN_MESSAGE;
+		}
 	}
 	return $result;
 }
@@ -178,11 +177,11 @@ sub slicePacket {
 	my ($self, $data, $additional_data) = @_;
 	# temporary hack for new recvpackets format
 	my $switch = getMessageID($data);
-	my $real_length = $self->{rpackets}{$switch}{length};	
+	my $real_length = $self->{rpackets}{$switch}{length};
 	my $packet;
 
 	if (($real_length > 0) # packet size is not variable
-			&& (length($data) >= $real_length)) { 
+			&& (length($data) >= $real_length)) {
 		if (length($data) > $real_length) {
 			$packet = substr($data, 0, $real_length);
 			$$additional_data = substr($data, $real_length); # sliced data
@@ -201,10 +200,13 @@ sub slicePacket {
 					$packet = substr($data, 0, $packet_length);
 					$$additional_data = $next_data;
 				}
-			}		
+			}
 		}
 	}
 	return $packet; # real packet
+}
+
+1;
 }
 
 1;
